@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/NeonSludge/crl-updater/pkg/utils"
 	"github.com/google/renameio"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -151,7 +152,7 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 	}
 
 	// Read the first fragment and the remainder of the body
-	src := io.MultiReader(bytes.NewReader(head), http.MaxBytesReader(nil, r.Body, limit-int64(24)))
+	src := io.MultiReader(bytes.NewReader(head), utils.NewLimitedReadCloser(r.Body, limit-int64(24)))
 
 	// Copy data to destination and flush it
 	if _, err = io.Copy(dest, src); err != nil {
