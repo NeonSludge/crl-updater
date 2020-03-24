@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -29,28 +30,45 @@ var (
 	X509CRLDERMagic2 []byte = []byte{48, 131}
 )
 
-type Metrics struct {
-	Success      *prometheus.CounterVec
-	Error        *prometheus.CounterVec
-	SuccessTotal prometheus.Counter
-	ErrorTotal   prometheus.Counter
-}
+type (
+	// Global metrics
+	Metrics struct {
+		Success      *prometheus.CounterVec
+		Error        *prometheus.CounterVec
+		SuccessTotal prometheus.Counter
+		ErrorTotal   prometheus.Counter
+	}
 
-// CRL update job definition
-type CRLJob struct {
-	ID cron.EntryID
+	// Main configuration
+	Config struct {
+		CRLJobs []*CRLJob `yaml:"jobs"`
+	}
 
-	Source          string `yaml:"src"`
-	Destination     string `yaml:"dest"`
-	Schedule        string `yaml:"schedule"`
-	TimeoutHuman    string `yaml:"timeout"`
-	TimeoutDuration time.Duration
+	// CRL update job definition
+	CRLJob struct {
+		ID cron.EntryID
 
-	Metrics *Metrics
-}
+		// Source URL to download the CRL from
+		Source string `yaml:"src"`
+		// Destination file to save the CRL to
+		Destination string `yaml:"dest"`
+		// CRL update job cron schedule
+		Schedule string `yaml:"schedule"`
+		// CRL file size limit
+		SizeLimit int64 `yaml:"limit"`
+		// CRL download attempt timeout (human readable)
+		TimeoutHuman string `yaml:"timeout"`
+		// CRL download attempt timeout (time.Duration)
+		TimeoutDuration time.Duration
+
+		// Global metrics to update from each job
+		Metrics *Metrics
+	}
+)
 
 // Runs this CRL update job
 func (j *CRLJob) Run() {
+	// Create a temporary file for the CRL
 	tempFile, err := renameio.TempFile(renameio.TempDir(filepath.Dir(j.Destination)), j.Destination)
 	if err != nil {
 		log.Printf("[%v] [%s]: failed to create a temporary file: %v", j.ID, j.Destination, err)
@@ -63,13 +81,15 @@ func (j *CRLJob) Run() {
 	tempWriter := bufio.NewWriter(tempFile)
 	tempHash := sha256.New()
 
-	if err := downloadCRL(j.Source, tempWriter, tempHash, j.TimeoutDuration); err != nil {
+	// Download the CRL, compute its checksum
+	if err := downloadCRL(j.Source, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit); err != nil {
 		log.Printf("[%v] [%s]: failed to download CRL: %v", j.ID, j.Destination, err)
 		j.Metrics.ErrorTotal.Inc()
 		j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
 		return
 	}
 
+	// Open the destination file to check if the CRL has changed
 	destFile, err := os.Open(j.Destination)
 	if err == nil {
 		defer destFile.Close()
@@ -82,6 +102,7 @@ func (j *CRLJob) Run() {
 			return
 		}
 
+		// No changes in the CRL, job is done
 		if bytes.Equal(tempHash.Sum(nil), destHash.Sum(nil)) {
 			log.Printf("[%v] [%s]: CRL source did not change", j.ID, j.Destination)
 			j.Metrics.SuccessTotal.Inc()
@@ -89,9 +110,11 @@ func (j *CRLJob) Run() {
 			return
 		}
 
+		// Close the destination file because Windows doesn't like replacing opened files
 		destFile.Close()
 	}
 
+	// Replace the destination file atomically
 	if err := tempFile.CloseAtomicallyReplace(); err != nil {
 		log.Printf("[%v] [%s]: failed to replace existing CRL file: %v", j.ID, j.Destination, err)
 		j.Metrics.ErrorTotal.Inc()
@@ -104,60 +127,40 @@ func (j *CRLJob) Run() {
 	j.Metrics.Success.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
 }
 
-// Config file structure
-type Config struct {
-	CRLJobs []*CRLJob `yaml:"jobs"`
-}
-
-// Unmarshal YAML in the config file
-func makeConfig(r *bufio.Reader) (*Config, error) {
-	b, err := ioutil.ReadAll(r)
-	if err != nil {
-		return nil, errors.Wrap(err, "config file loading failed")
-	}
-
-	cfg := &Config{}
-	err = yaml.Unmarshal(b, cfg)
-	if err != nil {
-		return nil, errors.Wrap(err, "YAML unmarshalling failed")
-	}
-
-	return cfg, nil
-}
-
-// Download CRL file from the specified location and write it to the specified Writer
-func downloadCRL(src string, w *bufio.Writer, h hash.Hash, timeout time.Duration) error {
-	c := &http.Client{Timeout: timeout}
-	r, err := c.Get(src)
+// Download CRL file and compute its checksum
+func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration, limit int64) error {
+	c := &http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{KeepAlive: -1}).DialContext}}
+	r, err := c.Get(url)
 	if r != nil {
 		defer r.Body.Close()
-		defer io.Copy(ioutil.Discard, r.Body)
 	}
 	if err != nil {
 		return errors.Wrap(err, "http request failed")
 	}
 
+	// Write the destination file and its hash
 	dest := io.MultiWriter(w, h)
 
+	// Read a small fragment of the response body first
 	head := make([]byte, 24)
 	if _, err := io.ReadFull(r.Body, head); err != nil {
 		return errors.Wrap(err, "head read failed")
 	}
 
+	// Validate the fragment to check if we're being offered a CRL file
 	if err := validateHead(head); err != nil {
 		return errors.Wrap(err, "head validation failed")
 	}
 
-	if _, err = io.Copy(dest, bytes.NewReader(head)); err != nil {
-		return errors.Wrap(err, "head copy failed")
-	}
+	// Read the first fragment and the remainder of the body
+	src := io.MultiReader(bytes.NewReader(head), http.MaxBytesReader(nil, r.Body, limit-int64(24)))
 
-	if _, err := io.Copy(dest, r.Body); err != nil {
-		return errors.Wrap(err, "body copy failed")
+	// Copy data to destination and flush it
+	if _, err = io.Copy(dest, src); err != nil {
+		return errors.Wrap(err, "copy failed")
 	}
-
 	if err := w.Flush(); err != nil {
-		return errors.Wrap(err, "temp writer flush failed")
+		return errors.Wrap(err, "flush failed")
 	}
 
 	return nil
@@ -172,6 +175,22 @@ func validateHead(b []byte) error {
 	}
 
 	return nil
+}
+
+// Load and unmarshal YAML in the config file
+func makeConfig(r *bufio.Reader) (*Config, error) {
+	b, err := ioutil.ReadAll(r)
+	if err != nil {
+		return nil, errors.Wrap(err, "config file loading failed")
+	}
+
+	cfg := &Config{}
+	err = yaml.Unmarshal(b, cfg)
+	if err != nil {
+		return nil, errors.Wrap(err, "YAML unmarshalling failed")
+	}
+
+	return cfg, nil
 }
 
 func main() {
@@ -192,6 +211,7 @@ func main() {
 	}
 	cfgFile.Close()
 
+	// Create Prometheus metrics
 	pmMetrics := &Metrics{
 		Success: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "crl_updater_success",
@@ -219,21 +239,26 @@ func main() {
 
 	sched := cron.New()
 	jobs := cfg.CRLJobs
-	// Iterate on job list
+
 	for _, job := range jobs {
 		if job.Source == "" || job.Destination == "" {
 			log.Printf("empty source (%s) or destination (%s), skipping job", job.Source, job.Destination)
 			continue
 		}
-		// Default schedule (if not specified/invalid)
+		// Validate schedule (if not specified/invalid)
 		if _, err := cron.ParseStandard(job.Schedule); err != nil {
-			log.Printf("[%s]: failed to parse job schedule, assuming default: %v", job.Destination, err)
+			log.Printf("[%s]: failed to parse job schedule, assuming default (@hourly): %v", job.Destination, err)
 			job.Schedule = "@hourly"
 		}
-		// Default timeout (if not specified/invalid)
+		// Validate download attempt timeout (if not specified/invalid)
 		if job.TimeoutDuration, err = time.ParseDuration(job.TimeoutHuman); err != nil {
-			log.Printf("[%s]: failed to parse job timeout, assuming default: %v", job.Destination, err)
+			log.Printf("[%s]: failed to parse job timeout, assuming default (1m): %v", job.Destination, err)
 			job.TimeoutDuration = time.Second * 60
+		}
+		// Validate CRL size limit
+		if job.SizeLimit <= 0 {
+			log.Printf("[%s]: invalid CRL size limit, assuming default (10MiB)", job.Destination)
+			job.SizeLimit = 10485760
 		}
 		// Add job to scheduler
 		id, err := sched.AddJob(job.Schedule, job)
@@ -248,10 +273,9 @@ func main() {
 	// Run jobs
 	sched.Start()
 
-	for {
-		http.Handle("/metrics", promhttp.HandlerFor(pmReg, promhttp.HandlerOpts{}))
-		if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
-			log.Fatal(err)
-		}
+	// Serve metrics
+	http.Handle("/metrics", promhttp.HandlerFor(pmReg, promhttp.HandlerOpts{}))
+	if err := http.ListenAndServe(*metricsAddr, nil); err != nil {
+		log.Fatal(err)
 	}
 }
