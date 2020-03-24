@@ -35,6 +35,7 @@ const (
 	DefaultTimeoutDuration time.Duration = time.Minute
 	DefaultSizeLimit       int64         = 10485760
 	DefaultSchedule        string        = "@hourly"
+	DefaultFileMode        uint32        = 0644
 )
 
 type (
@@ -60,7 +61,7 @@ type (
 		// Destination file to save the CRL to
 		Destination string `yaml:"dest"`
 		// Desired file permissions for the CRL file
-		Mode interface{} `yaml:"mode"`
+		Mode uint32 `yaml:"mode"`
 		// Desired owner of the CRL file
 		Owner string `yaml:"owner"`
 		UID   int
@@ -135,7 +136,7 @@ func (j *CRLJob) Run() {
 			j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
 			return
 		}
-		if err := os.Chmod(tempFile.Name(), j.Mode.(os.FileMode)); err != nil {
+		if err := os.Chmod(tempFile.Name(), os.FileMode(j.Mode)); err != nil {
 			log.Error().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Err(err).Msg("temporary file chmod failed")
 			j.Metrics.ErrorTotal.Inc()
 			j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
@@ -193,13 +194,8 @@ func (j *CRLJob) Prepare() error {
 		}
 
 		if j.Mode == 0 {
-			j.Mode = 0644
+			j.Mode = DefaultFileMode
 		}
-		mode, ok := j.Mode.(os.FileMode)
-		if !ok {
-			return errors.New("file mode type assertion failed")
-		}
-		j.Mode = mode
 	}
 
 	// Validate schedule (if not specified/invalid)
@@ -329,7 +325,6 @@ func main() {
 	jobs := cfg.CRLJobs
 
 	for _, job := range jobs {
-
 		// Prepare and validate job parameters
 		if err := job.Prepare(); err != nil {
 			log.Error().Str("dest", job.Destination).Str("url", job.URL).Err(err).Msg("skipping job")
