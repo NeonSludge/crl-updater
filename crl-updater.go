@@ -24,10 +24,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-var (
+const (
 	X509CRLPEMHeader string = "-----BEGIN X509 CRL-----"
-	X509CRLDERMagic1 []byte = []byte{48, 130}
-	X509CRLDERMagic2 []byte = []byte{48, 131}
 )
 
 type (
@@ -147,9 +145,9 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 		return errors.Wrap(err, "head read failed")
 	}
 
-	// Validate the fragment to check if we're being offered a CRL file
-	if err := validateHead(head); err != nil {
-		return errors.Wrap(err, "head validation failed")
+	// Check if we're being offered a CRL file
+	if !isCRL(head) {
+		return errors.New("source is not a DER or PEM encoded CRL")
 	}
 
 	// Read the first fragment and the remainder of the body
@@ -166,15 +164,9 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 	return nil
 }
 
-// Validate received response fragment
-func validateHead(b []byte) error {
-	if string(b) != X509CRLPEMHeader {
-		if !(bytes.Equal(b[:2], X509CRLDERMagic1) || bytes.Equal(b[:2], X509CRLDERMagic2)) {
-			return errors.New("not a PEM or DER encoded file")
-		}
-	}
-
-	return nil
+// Check if passed byte slice is a beginning of a DER or PEM encoded CRL
+func isCRL(b []byte) bool {
+	return string(b) == X509CRLPEMHeader || (b[0] == 0x30 && (b[1] == 0x82 || b[1] == 0x83))
 }
 
 // Load and unmarshal YAML in the config file
