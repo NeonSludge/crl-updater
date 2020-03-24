@@ -68,6 +68,8 @@ type (
 		// Desired group of the CRL file
 		Group string `yaml:"group"`
 		GID   int
+		// Force CRL file update, skip all checks
+		ForceUpdate bool `yaml:"force"`
 		// CRL update job cron schedule
 		Schedule string `yaml:"schedule"`
 		// CRL file size limit
@@ -97,36 +99,38 @@ func (j *CRLJob) Run() {
 	tempHash := sha256.New()
 
 	// Download the CRL, compute its checksum
-	if err := downloadCRL(j.URL, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit); err != nil {
+	if err := downloadCRL(j.URL, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit, j.ForceUpdate); err != nil {
 		log.Error().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Err(err).Msg("failed to download CRL")
 		j.Metrics.ErrorTotal.Inc()
 		j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
 		return
 	}
 
-	// Open the destination file to check if the CRL has changed
-	destFile, err := os.Open(j.Destination)
-	if err == nil {
-		defer destFile.Close()
+	if !j.ForceUpdate {
+		// Open the destination file to check if the CRL has changed
+		destFile, err := os.Open(j.Destination)
+		if err == nil {
+			defer destFile.Close()
 
-		destHash := sha256.New()
-		if _, err := io.Copy(destHash, bufio.NewReader(destFile)); err != nil {
-			log.Error().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Err(err).Msg("failed to compare CRL files")
-			j.Metrics.ErrorTotal.Inc()
-			j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
-			return
+			destHash := sha256.New()
+			if _, err := io.Copy(destHash, bufio.NewReader(destFile)); err != nil {
+				log.Error().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Err(err).Msg("failed to compare CRL files")
+				j.Metrics.ErrorTotal.Inc()
+				j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
+				return
+			}
+
+			// No changes in the CRL, job is done
+			if bytes.Equal(tempHash.Sum(nil), destHash.Sum(nil)) {
+				log.Info().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Msg("CRL source did not change")
+				j.Metrics.SuccessTotal.Inc()
+				j.Metrics.Success.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
+				return
+			}
+
+			// Close the destination file because Windows doesn't like replacing opened files
+			destFile.Close()
 		}
-
-		// No changes in the CRL, job is done
-		if bytes.Equal(tempHash.Sum(nil), destHash.Sum(nil)) {
-			log.Info().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Msg("CRL source did not change")
-			j.Metrics.SuccessTotal.Inc()
-			j.Metrics.Success.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
-			return
-		}
-
-		// Close the destination file because Windows doesn't like replacing opened files
-		destFile.Close()
 	}
 
 	if runtime.GOOS != "windows" {
@@ -215,7 +219,7 @@ func (j *CRLJob) Prepare() error {
 }
 
 // Download CRL file and compute its checksum
-func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration, limit int64) error {
+func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration, limit int64, force bool) error {
 	c := &http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{KeepAlive: -1}).DialContext}}
 	r, err := c.Get(url)
 	if r != nil {
@@ -225,24 +229,31 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 		return errors.Wrap(err, "http request failed")
 	}
 
-	// Write the destination file and its hash
-	dest := io.MultiWriter(w, h)
+	// Destination is the temporary file writer
+	// Source is the entire response body
+	dest := w
+	src := bufio.NewReader(r.Body)
 
-	// Read a small fragment of the response body first
-	head := make([]byte, 24)
-	if _, err := io.ReadFull(r.Body, head); err != nil {
-		return errors.Wrap(err, "head read failed")
+	if !force {
+		// Destination is the temporary file and its hash
+		dest = bufio.NewWriter(io.MultiWriter(w, h))
+
+		// Read a small fragment of the response body first
+		head := make([]byte, 24)
+		if _, err := io.ReadFull(r.Body, head); err != nil {
+			return errors.Wrap(err, "head read failed")
+		}
+
+		// Check if we're being offered a CRL file
+		if !isCRL(head) {
+			return errors.New("source is not a DER or PEM encoded CRL")
+		}
+
+		// Source is the header and the remainder of the response body
+		src = bufio.NewReader(io.MultiReader(bytes.NewReader(head), utils.NewLimitedReadCloser(r.Body, limit-int64(24))))
 	}
 
-	// Check if we're being offered a CRL file
-	if !isCRL(head) {
-		return errors.New("source is not a DER or PEM encoded CRL")
-	}
-
-	// Read the first fragment and the remainder of the body
-	src := io.MultiReader(bytes.NewReader(head), utils.NewLimitedReadCloser(r.Body, limit-int64(24)))
-
-	// Copy data to destination and flush it
+	// Copy source to destination and flush the temporary file writer
 	if _, err = io.Copy(dest, src); err != nil {
 		return errors.Wrap(err, "copy failed")
 	}
