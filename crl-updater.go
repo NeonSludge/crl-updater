@@ -47,7 +47,7 @@ type (
 		ID cron.EntryID
 
 		// Source URL to download the CRL from
-		Source string `yaml:"src"`
+		URL string `yaml:"url"`
 		// Destination file to save the CRL to
 		Destination string `yaml:"dest"`
 		// CRL update job cron schedule
@@ -80,7 +80,7 @@ func (j *CRLJob) Run() {
 	tempHash := sha256.New()
 
 	// Download the CRL, compute its checksum
-	if err := downloadCRL(j.Source, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit); err != nil {
+	if err := downloadCRL(j.URL, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit); err != nil {
 		log.Printf("[%v] [%s]: failed to download CRL: %v", j.ID, j.Destination, err)
 		j.Metrics.ErrorTotal.Inc()
 		j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
@@ -233,8 +233,8 @@ func main() {
 	jobs := cfg.CRLJobs
 
 	for _, job := range jobs {
-		if job.Source == "" || job.Destination == "" {
-			log.Printf("empty source (%s) or destination (%s), skipping job", job.Source, job.Destination)
+		if job.URL == "" || job.Destination == "" {
+			log.Printf("empty source (%s) or destination (%s), skipping job", job.URL, job.Destination)
 			continue
 		}
 		// Validate schedule (if not specified/invalid)
