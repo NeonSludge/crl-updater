@@ -3,8 +3,8 @@
 Small daemon that takes a list of CRL file update jobs, runs them periodically and publishes success and failure counts as Prometheus metrics. 
 
 It performs basic sanity checks on the files that are being downloaded:
-* The source file MUST be smaller than the limit specified at the job level.
-* The source file MUST start with a standard X.509 CRL PEM header (`-----BEGIN X509 CRL-----`) OR its first two bytes MUST equal `0x30 0x82` OR `0x30 0x83`
+* Source file MUST be smaller than the limit specified at the job level.
+* Source file MUST start with a standard X.509 CRL PEM header (`-----BEGIN X509 CRL-----`) OR its first two bytes MUST equal `0x30 0x82` OR `0x30 0x83`. This check is performed on the first 24 bytes of the source file. If it does not pass, the download attempt will fail.
 
 There is also an option to disable these checks for a specific job.
 
