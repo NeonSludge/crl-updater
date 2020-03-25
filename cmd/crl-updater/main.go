@@ -30,56 +30,46 @@ import (
 )
 
 const (
-	X509CRLPEMHeader string = "-----BEGIN X509 CRL-----"
+	X509CRLPEMHeader string = "-----BEGIN X509 CRL-----" // X.509 CRL PEM header
 
-	DefaultTimeoutDuration time.Duration = time.Minute
-	DefaultSizeLimit       int64         = 10485760
-	DefaultSchedule        string        = "@hourly"
-	DefaultFileMode        uint32        = 0644
+	DefaultTimeoutDuration time.Duration = time.Minute // Default CRL download timeout
+	DefaultSizeLimit       int64         = 10485760    // Default CRL size limit
+	DefaultSchedule        string        = "@hourly"   // Default CRL download schedule
+	DefaultFileMode        uint32        = 0644        // Default CRL file permissions
 )
 
 type (
 	// Global metrics
 	Metrics struct {
-		Success      *prometheus.CounterVec
-		Error        *prometheus.CounterVec
-		SuccessTotal prometheus.Counter
-		ErrorTotal   prometheus.Counter
+		Success      *prometheus.CounterVec // Successful update attempts count (per job)
+		Error        *prometheus.CounterVec // Unsuccessful update attempts count (per job)
+		SuccessTotal prometheus.Counter     // Successful update attempts count (all jobs combined)
+		ErrorTotal   prometheus.Counter     // Unsuccessful update attempts count (all jobs combined)
 	}
 
 	// Main configuration
 	Config struct {
-		CRLJobs []*CRLJob `yaml:"jobs"`
+		CRLJobs []*CRLJob `yaml:"jobs"` // CRL update job list
 	}
 
 	// CRL update job definition
 	CRLJob struct {
-		ID cron.EntryID
+		ID cron.EntryID // Cron job identifier
 
-		// Source URL to download the CRL from
-		URL string `yaml:"url"`
-		// Destination file to save the CRL to
-		Destination string `yaml:"dest"`
-		// Desired file permissions for the CRL file
-		Mode uint32 `yaml:"mode"`
-		// Desired owner of the CRL file
-		Owner string `yaml:"owner"`
-		UID   int
-		// Desired group of the CRL file
-		Group string `yaml:"group"`
-		GID   int
-		// Force CRL file update, skip all checks
-		ForceUpdate bool `yaml:"force"`
-		// CRL update job cron schedule
-		Schedule string `yaml:"schedule"`
-		// CRL file size limit
-		SizeLimit int64 `yaml:"limit"`
-		// CRL download attempt timeout
-		TimeoutHuman    string `yaml:"timeout"`
+		URL             string `yaml:"url"`   // Source URL to download the CRL from
+		Destination     string `yaml:"dest"`  // Destination file to save the CRL to
+		Mode            uint32 `yaml:"mode"`  // Desired file permissions for the CRL file
+		Owner           string `yaml:"owner"` // Desired owner of the CRL file
+		UID             int    // Owner numeric ID
+		Group           string `yaml:"group"` // Desired group of the CRL file
+		GID             int    // Group numeric ID
+		ForceUpdate     bool   `yaml:"force"`    // Force CRL file update, skip all checks
+		Schedule        string `yaml:"schedule"` // CRL update job cron schedule
+		SizeLimit       int64  `yaml:"limit"`    // CRL file size limit
+		TimeoutHuman    string `yaml:"timeout"`  // CRL download attempt timeout
 		TimeoutDuration time.Duration
 
-		// Global metrics to update from each job
-		Metrics *Metrics
+		Metrics *Metrics // Global metrics to update from each job
 	}
 )
 
