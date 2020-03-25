@@ -95,11 +95,10 @@ func (j *CRLJob) Run() {
 	}
 	defer tempFile.Cleanup()
 
-	tempWriter := bufio.NewWriter(tempFile)
 	tempHash := sha256.New()
 
 	// Download the CRL, compute its checksum
-	if err := downloadCRL(j.URL, tempWriter, tempHash, j.TimeoutDuration, j.SizeLimit, j.ForceUpdate); err != nil {
+	if err := downloadCRL(j.URL, tempFile, tempHash, j.TimeoutDuration, j.SizeLimit, j.ForceUpdate); err != nil {
 		log.Error().Interface("id", j.ID).Str("dest", j.Destination).Str("url", j.URL).Err(err).Msg("failed to download CRL")
 		j.Metrics.ErrorTotal.Inc()
 		j.Metrics.Error.With(prometheus.Labels{"job": fmt.Sprintf("%v", j.ID), "file": j.Destination}).Inc()
@@ -219,7 +218,7 @@ func (j *CRLJob) Prepare() error {
 }
 
 // Download CRL file and compute its checksum
-func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration, limit int64, force bool) error {
+func downloadCRL(url string, w io.Writer, h hash.Hash, timeout time.Duration, limit int64, force bool) error {
 	c := &http.Client{Timeout: timeout, Transport: &http.Transport{DisableKeepAlives: true, DialContext: (&net.Dialer{KeepAlive: -1}).DialContext}}
 	r, err := c.Get(url)
 	if r != nil {
@@ -232,11 +231,11 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 	// Destination is the temporary file writer
 	// Source is the entire response body
 	dest := w
-	src := bufio.NewReader(r.Body)
+	src := io.Reader(r.Body)
 
 	if !force {
 		// Destination is the temporary file and its hash
-		dest = bufio.NewWriter(io.MultiWriter(w, h))
+		dest = io.MultiWriter(w, h)
 
 		// Read a small fragment of the response body first
 		head := make([]byte, 24)
@@ -250,15 +249,12 @@ func downloadCRL(url string, w *bufio.Writer, h hash.Hash, timeout time.Duration
 		}
 
 		// Source is the header and the remainder of the response body
-		src = bufio.NewReader(io.MultiReader(bytes.NewReader(head), utils.NewLimitedReadCloser(r.Body, limit-int64(24))))
+		src = utils.LimitStrictReader(io.MultiReader(bytes.NewReader(head), src), limit)
 	}
 
 	// Copy source to destination and flush the temporary file writer
 	if _, err = io.Copy(dest, src); err != nil {
 		return errors.Wrap(err, "copy failed")
-	}
-	if err := w.Flush(); err != nil {
-		return errors.Wrap(err, "flush failed")
 	}
 
 	return nil
