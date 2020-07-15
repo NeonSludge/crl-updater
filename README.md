@@ -1,4 +1,6 @@
 # crl-updater
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FNeonSludge%2Fcrl-updater.svg?type=shield)](https://app.fossa.com/projects/git%2Bgithub.com%2FNeonSludge%2Fcrl-updater?ref=badge_shield)
+
 
 Small daemon that takes a list of CRL file update jobs, runs them periodically and publishes success and failure counts as Prometheus metrics. 
 
@@ -58,3 +60,7 @@ crl_updater_success{job="job ID", file="destination file name"} | Number of succ
 crl_updater_error{job="job ID", file="destination file name"} | Number of unsuccessful CRL update attempts per job. | Counter |
 crl_updater_success_total | Number of successful CRL update attempts. | Counter |
 crl_updater_error_total | Number of unsuccessful CRL update attempts. | Counter |
+
+
+## License
+[![FOSSA Status](https://app.fossa.com/api/projects/git%2Bgithub.com%2FNeonSludge%2Fcrl-updater.svg?type=large)](https://app.fossa.com/projects/git%2Bgithub.com%2FNeonSludge%2Fcrl-updater?ref=badge_large)
